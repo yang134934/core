@@ -12,6 +12,8 @@ use alloc::vec::Vec;
 use core::arch::asm;
 use lazy_static::*;
 use riscv::register::satp;
+use log::debug;
+
 
 extern "C" {
     fn stext();
@@ -36,6 +38,7 @@ lazy_static! {
 pub struct MemorySet {
     page_table: PageTable,
     areas: Vec<MapArea>,
+    map_tree: BTreeMap<VirtPageNum, FrameTracker>,
 }
 
 impl MemorySet {
@@ -43,6 +46,7 @@ impl MemorySet {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
+            map_tree: BTreeMap::new(),
         }
     }
     pub fn token(&self) -> usize {
@@ -266,6 +270,82 @@ impl MemorySet {
             false
         }
     }
+    pub fn mmap(&mut self, start: usize, len: usize, port: usize) -> isize {
+    let va_start: VirtAddr = start.into();
+    if !va_start.aligned() {
+        debug!("unmap fail don't aligned");
+        return -1;
+    }
+    let mut va_start: VirtPageNum = va_start.into();
+
+    let mut flags = PTEFlags::from_bits(port as u8).unwrap();
+    if port & 0b0000_0001 != 0 {
+        flags |= PTEFlags::R;
+    }
+
+    if port & 0b0000_0010 != 0 {
+        flags |= PTEFlags::W;
+    }
+
+    if port & 0b0000_0100 != 0 {
+        flags |= PTEFlags::X;
+    }
+    flags |= PTEFlags::U;
+    flags |= PTEFlags::V;
+
+    let va_end: VirtAddr = (start + len).into();
+    let va_end: VirtPageNum = va_end.ceil();
+
+     println!(
+         "start = {:x} && va_star = {} && va_end = {}",
+         start, va_start.0, va_end.0
+     );
+
+    while va_start != va_end {
+         println!("map va_start = {}", va_start.0);
+        if let Some(pte) = self.page_table.translate(va_start) {
+            if pte.is_valid() {
+                 println!("mmap found exit va_start {}", va_start.0);
+                return -1;
+            }
+        }
+        if let Some(ppn) = frame_alloc() {
+            self.page_table.map(va_start, ppn.ppn, flags);
+            self.map_tree.insert(va_start, ppn);
+        } else {
+            return -1;
+        }
+        va_start.step();
+    }
+    0
+}
+pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+    let va_start: VirtAddr = start.into();
+    if !va_start.aligned() {
+        debug!("unmap fail don't aligned");
+        return -1;
+    }
+    let mut va_start: VirtPageNum = va_start.into();
+
+    let va_end: VirtAddr = (start + len).into();
+    let va_end: VirtPageNum = va_end.ceil();
+
+    while va_start != va_end {
+        // println!("unmap va_start = {}", va_start.0);
+        if let Some(item) = self.page_table.translate(va_start) {
+            if !item.is_valid() {
+                debug!("unmap on no map vpn");
+                return -1;
+            }
+        } else {
+            return -1;
+        }
+        self.page_table.unmap(va_start);
+        self.map_tree.remove(&va_start);
+        va_start.step();
+    }
+    0
+}
 }
 
 /// map area structure, controls a contiguous piece of virtual memory
@@ -403,3 +483,15 @@ pub fn remap_test() {
         .executable(),);
     println!("remap_test passed!");
 }
+pub fn mmap(start: usize, len: usize, port: usize) -> isize {
+    // 获取 MemorySet 实例的可变引用
+    let mut memory_set = KERNEL_SPACE.exclusive_access();
+    return memory_set.mmap(start, len, port)
+}
+
+pub fn munmap(start: usize, len: usize) -> isize {
+    // 获取 MemorySet 实例的可变引用
+    let mut memory_set = KERNEL_SPACE.exclusive_access();
+    return memory_set.munmap(start, len)
+}
+
